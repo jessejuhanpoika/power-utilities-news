@@ -1,4 +1,5 @@
-yamlname: PowerBrief
+yaml
+name: PowerBrief
 
 on:
   schedule:
