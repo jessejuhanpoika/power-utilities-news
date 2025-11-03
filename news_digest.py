@@ -20,13 +20,16 @@ RSS_FEEDS = [
 def get_news():
     """Fetch and process news articles"""
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-pro')  # Changed from gemini-1.5-flash
     
     # Collect all articles
     all_articles = []
+    print(f"📡 Fetching from {len(RSS_FEEDS)} RSS feeds...")
+    
     for feed_url in RSS_FEEDS:
         try:
             feed = feedparser.parse(feed_url)
+            articles_found = 0
             for entry in feed.entries[:5]:  # Get top 5 from each source
                 article = {
                     'title': entry.title,
@@ -34,8 +37,16 @@ def get_news():
                     'summary': entry.get('summary', '')[:300]
                 }
                 all_articles.append(f"Title: {article['title']}\nPreview: {article['summary']}\nURL: {article['link']}\n")
-        except:
+                articles_found += 1
+            print(f"  ✓ Found {articles_found} articles from {feed_url}")
+        except Exception as e:
+            print(f"  ✗ Failed to fetch from {feed_url}: {e}")
             continue
+    
+    print(f"📊 Total articles collected: {len(all_articles)}")
+    
+    if not all_articles:
+        raise Exception("No articles were fetched from any RSS feed")
     
     # Ask Gemini to select and summarize the best articles
     prompt = f"""
@@ -58,7 +69,9 @@ def get_news():
     Make it professional but easy to scan quickly.
     """
     
+    print("🤖 Generating digest with Gemini AI...")
     response = model.generate_content(prompt)
+    print("✓ Digest generated successfully")
     return response.text
 
 def send_email_resend(content):
@@ -81,6 +94,8 @@ def send_email_resend(content):
     </div>
     """
     
+    print(f"📧 Sending email to {YOUR_EMAIL}...")
+    
     response = requests.post(
         "https://api.resend.com/emails",
         headers={
@@ -97,15 +112,26 @@ def send_email_resend(content):
     
     if response.status_code == 200:
         print(f"✅ Email sent successfully to {YOUR_EMAIL}")
+        print(f"📬 Response: {response.json()}")
     else:
+        print(f"❌ Email send failed with status {response.status_code}")
         print(f"❌ Error: {response.text}")
+        raise Exception(f"Failed to send email: {response.text}")
 
 # Main execution
 if __name__ == "__main__":
     try:
+        print("=" * 50)
+        print("🚀 Starting Power & Utilities News Digest")
+        print("=" * 50)
         print("📰 Fetching Power & Utilities news...")
         content = get_news()
-        print("📧 Sending email digest...")
         send_email_resend(content)
+        print("=" * 50)
+        print("✅ Process completed successfully!")
+        print("=" * 50)
     except Exception as e:
+        print("=" * 50)
         print(f"❌ Error: {e}")
+        print("=" * 50)
+        raise  # Re-raise to make GitHub Actions show as failed
