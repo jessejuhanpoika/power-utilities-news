@@ -1,11 +1,8 @@
-
 name: PowerBrief
-
 on:
   schedule:
     - cron: '0 13 * * *'  # Runs at 1 PM UTC daily
   workflow_dispatch:  # Allows manual triggering for testing
-
 jobs:
   send-news:
     runs-on: ubuntu-latest
