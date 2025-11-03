@@ -1,0 +1,32 @@
+yamlname: Daily Power & Utilities News
+
+on:
+  schedule:
+    - cron: '0 13 * * *'  # Runs at 1 PM UTC daily
+  workflow_dispatch:  # Allows manual triggering for testing
+
+jobs:
+  send-news:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      
+      - name: Install required packages
+        run: |
+          pip install feedparser
+          pip install google-generativeai
+          pip install requests
+      
+      - name: Run news digest script
+        env:
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+          YOUR_EMAIL: ${{ secrets.YOUR_EMAIL }}
+          RESEND_KEY: ${{ secrets.RESEND_KEY }}
+        run: python news_digest.py
