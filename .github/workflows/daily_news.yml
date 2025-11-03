@@ -1,4 +1,4 @@
-yamlname: Daily Power & Utilities News
+yamlname: PowerBrief
 
 on:
   schedule:
