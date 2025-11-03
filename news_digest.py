@@ -1,4 +1,4 @@
-pythonimport feedparser
+import feedparser
 import google.generativeai as genai
 import requests
 from datetime import datetime
