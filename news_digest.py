@@ -11,16 +11,54 @@ RESEND_API_KEY = os.environ.get('RESEND_KEY')
 
 # Power & Utilities RSS Feeds
 RSS_FEEDS = [
+    # Industry & grid
     'https://www.utilitydive.com/feeds/news/',
     'https://www.renewableenergyworld.com/feed/',
     'https://www.energy.gov/rss/news.xml',
     'https://www.powermag.com/feed/',
+    'https://www.canarymedia.com/rss-feed',
+    'https://renewablesnow.com/feed/',
+    'https://www.tdworld.com/rss',                  # T&D World (site feed)
+    'https://tanddworld.podbean.com/feed.xml',      # T&D World podcast
+
+    # Protection, automation & IEC 61850
+    'http://electrical-engineering-portal.com/category/protection/feed',
+    'https://iec61850.blogspot.com/feeds/posts/default?alt=rss',
+    'https://www.inmr.com/feed/',
+
+    # Storage / DERs
+    'https://www.energy-storage.news/feed/',
+    'https://www.pv-magazine.com/feed/',
+
+    # Europe/UK policy & utility news
+    'https://utilityweek.co.uk/feed/',
+    'https://www.entsoe.eu/feed/',                  # ENTSO-E (site-wide)
+    'https://www.ofgem.gov.uk/rss.xml',      
 ]
 
 def get_news():
     """Fetch and process news articles"""
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-pro')  # Changed from gemini-1.5-flash
+    
+    # List available models and use the first one that supports generateContent
+    print("📋 Finding available Gemini models...")
+    available_model = None
+    try:
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_model = m.name
+                print(f"  ✓ Using model: {available_model}")
+                break
+    except Exception as e:
+        print(f"  ✗ Could not list models: {e}")
+        # Fallback to trying common model names
+        available_model = 'gemini-pro'
+        print(f"  Using fallback model: {available_model}")
+    
+    if not available_model:
+        raise Exception("No compatible Gemini model found")
+    
+    model = genai.GenerativeModel(available_model)
     
     # Collect all articles
     all_articles = []
