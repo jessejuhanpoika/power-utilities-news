@@ -1,58 +1,59 @@
 #!/usr/bin/env python3
 """
-Power & Utilities News Digest
+Power & Utilities News Digest with Email Delivery
 
-- Python 3.9+ compatible (uses importlib_metadata backport if needed)
-- Fetches RSS from curated feeds (Power/Utilities, P&C/IEC 61850, DER/Storage, Policy)
-- Summarizes with Gemini if GOOGLE_API_KEY is set and quota available
-- Graceful fallback to "headlines-only" when no LLM or quota
-- --html flag to emit HTML for email/newsletter
-
-Usage:
-  python news_digest.py            # plaintext to stdout
-  python news_digest.py --html     # HTML to stdout (for email)
+Fetches RSS feeds, summarizes with Gemini (or fallback to headlines), 
+and sends via Resend email API.
 """
 
 import os
 import sys
 import time
 import textwrap
-import argparse
 from datetime import datetime, timezone
 
-# ---- Python 3.9 compat for importlib.metadata (some Google libs expect newer) ----
+# ---- Python 3.9 compat ----
 try:
-    from importlib.metadata import packages_distributions  # noqa: F401
-except Exception:  # Py<3.10
+    from importlib.metadata import packages_distributions
+except Exception:
     try:
-        from importlib_metadata import packages_distributions  # type: ignore # noqa: F401
+        from importlib_metadata import packages_distributions
     except Exception:
-        packages_distributions = None  # type: ignore
+        packages_distributions = None
 
-# ---- Third-party deps -----------------------------------------------------------
+# ---- Dependencies ----
 try:
     import feedparser
-except ImportError:
-    print("Missing dependency: feedparser. Install with: pip install feedparser", file=sys.stderr)
+    import requests
+except ImportError as e:
+    print(f"Missing dependency: {e}. Install with: pip install feedparser requests", file=sys.stderr)
     sys.exit(1)
 
-# Gemini is optional; we handle absence gracefully
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+# ---- Config from environment ----
+GOOGLE_API_KEY = os.getenv("GEMINI_KEY", "").strip()  # Note: using GEMINI_KEY to match your secrets
+YOUR_EMAIL = os.getenv("YOUR_EMAIL", "").strip()
+RESEND_API_KEY = os.getenv("RESEND_KEY", "").strip()
+
+if not YOUR_EMAIL or not RESEND_API_KEY:
+    print("ERROR: YOUR_EMAIL and RESEND_KEY environment variables are required!", file=sys.stderr)
+    sys.exit(1)
+
+# Gemini is optional
 GEMINI_AVAILABLE = False
-GEN_EXC = None
+genai = None
+gen_exceptions = None
 try:
     if GOOGLE_API_KEY:
-        import google.generativeai as genai  # type: ignore
-        from google.api_core import exceptions as gen_exceptions  # type: ignore
+        import google.generativeai as genai
+        from google.api_core import exceptions as gen_exceptions
         genai.configure(api_key=GOOGLE_API_KEY)
         GEMINI_AVAILABLE = True
 except Exception as e:
-    GEN_EXC = e
+    print(f"⚠️  Gemini SDK not available: {e}")
     GEMINI_AVAILABLE = False
 
-# ---- Config --------------------------------------------------------------------
+# ---- RSS Feeds ----
 RSS_FEEDS = [
-    # Industry & grid
     "https://www.utilitydive.com/feeds/news/",
     "https://www.renewableenergyworld.com/feed/",
     "https://www.energy.gov/rss/news.xml",
@@ -61,33 +62,26 @@ RSS_FEEDS = [
     "https://renewablesnow.com/feed/",
     "https://www.tdworld.com/rss",
     "https://tanddworld.podbean.com/feed.xml",
-
-    # Protection, automation & IEC 61850
     "http://electrical-engineering-portal.com/category/protection/feed",
     "https://iec61850.blogspot.com/feeds/posts/default?alt=rss",
     "https://www.inmr.com/feed/",
-
-    # Storage / DERs
     "https://www.energy-storage.news/feed/",
     "https://www.pv-magazine.com/feed/",
-
-    # Europe/UK policy & utility news
     "https://utilityweek.co.uk/feed/",
     "https://www.entsoe.eu/feed/",
     "https://www.ofgem.gov.uk/rss.xml",
 ]
 
-MAX_PER_FEED = 5     # keep token usage & runtime predictable
+MAX_PER_FEED = 5
 MAX_ARTICLES = 40
 
 GEMINI_MODELS = [
-    "models/gemini-2.5-pro-preview-03-25",
-    "models/gemini-1.5-pro",
-    "models/gemini-1.5-flash",
+    "models/gemini-1.5-flash",  # Highest free quota
     "models/gemini-1.5-flash-8b",
+    "models/gemini-1.5-pro",
 ]
 
-# ---- Helpers -------------------------------------------------------------------
+# ---- Functions ----
 def log(msg: str):
     print(msg, flush=True)
 
@@ -95,159 +89,191 @@ def fetch_articles():
     log("=" * 50)
     log("🚀 Starting Power & Utilities News Digest")
     log("=" * 50)
-    log("📰 Fetching Power & Utilities news...")
+    log("📰 Fetching articles from RSS feeds...")
 
     all_items = []
     for url in RSS_FEEDS:
         try:
             d = feedparser.parse(url)
-            entries = d.entries[:MAX_PER_FEED] if getattr(d, "entries", None) else []
+            entries = d.entries[:MAX_PER_FEED] if hasattr(d, "entries") else []
             log(f"  ✓ Found {len(entries)} articles from {url}")
             for e in entries:
                 title = (getattr(e, "title", "") or "").strip()
                 link = (getattr(e, "link", "") or "").strip()
                 summary = (getattr(e, "summary", "") or getattr(e, "description", "") or "").strip()
-                published = getattr(e, "published", "") or getattr(e, "updated", "") or ""
-                ts = None
-                if hasattr(e, "published_parsed") and e.published_parsed:
-                    ts = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                elif hasattr(e, "updated_parsed") and e.updated_parsed:
-                    ts = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc)
                 all_items.append({
                     "title": title or "(no title)",
                     "link": link,
-                    "summary": summary,
-                    "published": published,
-                    "ts": ts or datetime.now(timezone.utc),
-                    "source": url,
+                    "summary": summary[:600],  # Cap length
                 })
         except Exception as ex:
-            log(f"  ! Error reading {url}: {ex}")
+            log(f"  ✗ Error reading {url}: {ex}")
 
-    all_items.sort(key=lambda x: x["ts"], reverse=True)
     return all_items[:MAX_ARTICLES]
 
 def build_prompt(items):
-    lines = []
-    lines.append(
-        "You are a utility-industry analyst. Summarize these articles into a crisp daily digest for a busy CCO in power & utilities focused on protection & control, IEC 61850, T&D grid, DER/storage, and regulation. "
-        "Be factual, brief, and actionable. Use bullets and short sections (Generation, T&D & Grid Ops, Protection & Control, DER/Storage, Policy/Regulatory, M&A/Financing). "
-        "For each bullet: include the headline (tightened), the publisher if obvious, and 1–2 key takeaways with concrete metrics/dates. End with 3 ‘What matters’ bullets."
-    )
-    lines.append("\nArticles:\n")
+    prompt = """You are a Power & Utilities industry expert. From these articles, select the 7 most important news items for industry professionals.
+
+For each selected article, provide:
+- Title (keep original)
+- One clear sentence explaining what happened
+- One sentence on why this matters for the P&U industry
+- The original URL
+
+Format as clean HTML for email with sections:
+1. <h3>Top Stories</h3> (3 most important)
+2. <h3>Market & Regulatory Updates</h3>
+3. <h3>Technology & Innovation</h3>
+
+Each article should be formatted as:
+<div style="margin-bottom: 20px;">
+  <h4 style="margin-bottom: 8px; color: #2c3e50;"><a href="URL" style="color: #3498db; text-decoration: none;">TITLE</a></h4>
+  <p style="margin: 4px 0;">WHAT HAPPENED</p>
+  <p style="margin: 4px 0; color: #7f8c8d; font-size: 14px;">WHY IT MATTERS</p>
+</div>
+
+Articles to review:
+"""
     for i, it in enumerate(items, 1):
-        # cap per-article context to reduce tokens
-        lines.append(f"{i}. {it['title']} — {it['link']}\nSummary: {it['summary'][:600]}")
-    return "\n".join(lines)
+        prompt += f"\n{i}. {it['title']}\n   Summary: {it['summary']}\n   URL: {it['link']}\n"
+    
+    return prompt
 
 def try_gemini_summarize(prompt):
-    assert GEMINI_AVAILABLE, "Gemini not available"
-    last_err = None
+    if not GEMINI_AVAILABLE:
+        raise RuntimeError("Gemini not available")
+    
     for model_name in GEMINI_MODELS:
         try:
+            log(f"  Trying model: {model_name}")
             model = genai.GenerativeModel(model_name)
-            for attempt in range(3):
+            
+            for attempt in range(2):
                 try:
                     resp = model.generate_content(prompt)
                     if hasattr(resp, "text") and resp.text:
+                        log(f"  ✓ Success with {model_name}")
                         return resp.text.strip()
-                    if getattr(resp, "candidates", None):
-                        parts = resp.candidates[0].content.parts
-                        text = "".join(getattr(p, "text", "") for p in parts)
-                        if text.strip():
-                            return text.strip()
-                    raise RuntimeError("Empty response from Gemini")
+                    raise RuntimeError("Empty response")
                 except gen_exceptions.ResourceExhausted as e:
-                    last_err = e
-                    time.sleep(2 + attempt * 2)
-                except gen_exceptions.GoogleAPIError as e:
-                    last_err = e
-                    break
+                    if "quota" in str(e).lower():
+                        log(f"  ✗ Quota exceeded for {model_name}")
+                        raise  # Don't retry quota errors
+                    time.sleep(2)
+                except Exception as e:
+                    if attempt == 0:
+                        time.sleep(1)
+                    else:
+                        raise
+        except gen_exceptions.ResourceExhausted:
+            continue  # Try next model
         except Exception as e:
-            last_err = e
+            log(f"  ✗ Failed with {model_name}: {e}")
             continue
-    raise RuntimeError(f"All Gemini attempts failed. Last error: {last_err}")
+    
+    raise RuntimeError("All Gemini models failed or quota exceeded")
 
-def format_headlines_only(items):
-    out = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    out.append("Power & Utilities — Headlines Digest (LLM unavailable)")
-    out.append(now)
-    out.append("")
-    for it in items:
-        line = f"- {it['title']} ({it['link']})"
-        out.append(textwrap.shorten(line, width=220, placeholder="…"))
-    out.append("")
-    out.append("What matters:")
-    out.append("• Watch protection & control updates impacting relay settings/misops.")
-    out.append("• Track interconnection/transmission constraints affecting project timelines.")
-    out.append("• Monitor regulatory moves (NERC/ENTSO-E/Ofgem) that change compliance scope.")
-    return "\n".join(out)
+def format_headlines_fallback(items):
+    html = "<div style='font-family: Arial, sans-serif;'>"
+    html += "<h3 style='color: #e74c3c;'>⚠️ AI Summary Unavailable - Top Headlines</h3>"
+    html += "<p style='color: #7f8c8d; font-size: 14px;'>The AI service is temporarily unavailable or quota exceeded. Here are today's top stories:</p>"
+    
+    for i, it in enumerate(items[:10], 1):
+        html += f"""
+        <div style="margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #ecf0f1;">
+            <strong>{i}. <a href="{it['link']}" style="color: #3498db; text-decoration: none;">{it['title']}</a></strong>
+        </div>
+        """
+    
+    html += "</div>"
+    return html
 
-def to_html(body_text: str, title: str = "PowerBrief — Utilities & P&C") -> str:
-    # Minimal inline CSS for email clients
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return f"""<!doctype html>
-<meta charset="utf-8">
-<title>{title}</title>
-<style>
-body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45;margin:24px auto;max-width:820px;padding:0 16px}}
-h1{{font-size:1.5rem;margin:0 0 4px}}
-small{{color:#444}}
-pre{{white-space:pre-wrap;word-wrap:break-word}}
-a{{text-decoration:none}}
-</style>
-<body>
-  <h1>{title}</h1>
-  <p><small>Generated {ts}</small></p>
-  <hr>
-  <pre>{body_text}</pre>
-</body>
-"""
+def send_email(content):
+    full_html = f"""
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+        <h2 style="color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px;">
+            ⚡ Power & Utilities Daily Brief
+        </h2>
+        <p style="color: #7f8c8d; font-size: 14px;">
+            {datetime.now().strftime('%A, %B %d, %Y')}
+        </p>
+        {content}
+        <hr style="margin-top: 30px; border: 1px solid #ecf0f1;">
+        <p style="font-size: 12px; color: #95a5a6;">
+            Generated using AI from multiple industry sources. 
+        </p>
+    </div>
+    """
+    
+    log(f"📧 Sending email to {YOUR_EMAIL}...")
+    
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "from": "PowerBrief <onboarding@resend.dev>",
+            "to": [YOUR_EMAIL],
+            "subject": f"⚡ Power & Utilities Daily - {datetime.now().strftime('%B %d')}",
+            "html": full_html
+        }
+    )
+    
+    if response.status_code == 200:
+        log(f"✅ Email sent successfully!")
+        log(f"   Response: {response.json()}")
+        return True
+    else:
+        log(f"❌ Email failed with status {response.status_code}")
+        log(f"   Error: {response.text}")
+        return False
 
 def main():
-    ap = argparse.ArgumentParser(description="Power & Utilities News Digest")
-    ap.add_argument("--html", action="store_true", help="Output HTML instead of plaintext")
-    args = ap.parse_args()
-
+    # Fetch articles
     items = fetch_articles()
     log(f"📊 Total articles collected: {len(items)}")
+    
     if not items:
-        log("No articles found. Exiting 0.")
-        print("No articles found.")
+        log("No articles found. Exiting.")
         return 0
-
-    prompt = build_prompt(items)
-    log("🤖 Generating digest...")
-
-    digest_text = None
+    
+    # Try to summarize with AI
+    log("🤖 Generating digest with AI...")
+    digest_html = None
+    
     if GEMINI_AVAILABLE:
         try:
-            digest_text = try_gemini_summarize(prompt)
+            prompt = build_prompt(items)
+            digest_html = try_gemini_summarize(prompt)
         except Exception as e:
-            log(f"❌ Gemini unavailable or quota exceeded. Falling back. ({e})")
+            log(f"⚠️  AI summarization failed: {e}")
+            log("📋 Falling back to headlines-only format...")
+            digest_html = format_headlines_fallback(items)
     else:
-        if GOOGLE_API_KEY:
-            log(f"❌ Gemini SDK error at import: {GEN_EXC}. Falling back.")
-        else:
-            log("ℹ️ GOOGLE_API_KEY not set. Using headlines-only digest.")
-
-    if not digest_text:
-        digest_text = format_headlines_only(items)
-
-    if args.html:
-        html = to_html(digest_text)
-        # Ensure UTF-8 output
-        sys.stdout.reconfigure(encoding="utf-8")
-        print(html)
+        log("ℹ️  GEMINI_KEY not set or SDK unavailable. Using headlines format.")
+        digest_html = format_headlines_fallback(items)
+    
+    # Send email
+    if send_email(digest_html):
+        log("=" * 50)
+        log("✅ Process completed successfully!")
+        log("=" * 50)
+        return 0
     else:
-        print("\n" + "=" * 50)
-        print(digest_text)
-        print("=" * 50 + "\n")
-    return 0
+        log("=" * 50)
+        log("❌ Email sending failed!")
+        log("=" * 50)
+        return 1
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
+    except Exception as e:
+        log(f"❌ Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
